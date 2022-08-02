@@ -1,0 +1,16 @@
+{
+    "name_description":"name of the host",
+    "name":"",
+    "password_description":"password of the host",
+    "password":"",
+    
+    "hostname_description":"hostname of the online server",
+    "hostname":"",
+    "port_description":"port of the online server",
+    "port":0,
+    
+    "sendPort_description":"Port in whitch the local server listen",
+    "sendPort":25565,
+    "startcommand_description":"the comand so start the local server",
+    "startcommand":""
+}

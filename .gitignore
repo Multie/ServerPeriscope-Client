@@ -1,0 +1,4 @@
+configs/*.json
+data/current/**
+data/old/**
+node_modules

@@ -1,0 +1,17 @@
+{
+  "name": "client",
+  "version": "1.0.0",
+  "description": "",
+  "main": "client.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "archiver": "^5.3.1",
+    "ws": "^8.8.1",
+    "yauzl": "^2.10.0",
+    "yazl": "^2.5.1"
+  }
+}
