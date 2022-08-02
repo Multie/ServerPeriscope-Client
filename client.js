@@ -173,14 +173,12 @@ class WebsocketClient {
     }
 
 }
-
 var WebsocketClientInstance = new WebsocketClient();
 //#endregion
 /////////////////////////////////////////////////////////////////
 //#region TCP Client
 const net = require('net');
 class tcpClient {
-
     constructor(config, incommingEvents, outgoingEvents) {
         this.config = config;
         this.incommingEvents = incommingEvents;
@@ -332,21 +330,27 @@ class WebClient {
                         Authorization: `Basic ${auth}`
                     }
                 }
-                console.log(options);
+                FS.mkdir(PATH.dirname(filepath), { recursive: true }, (err) => {
+                    if (err) {
+                        console.trace(err);
+                        reject(err);
+                        return;
+                    }
+                    logger("info", "WC", `Request ${method} ${path}`)
+                    let req = http.get(options, (res) => {
+                        logger("info", "WC", `Request statusCode:${res.statusCode}`)
 
-                logger("info", "WC", `Request ${method} ${path}`)
-                let req = http.get(options, (res) => {
-                    logger("info", "WC", `Request statusCode:${res.statusCode}`)
-
-                    res.pipe(FS.createWriteStream(filepath)).on('close', () => {
-                        logger("info", "WC", `close`);
-                        resolve();
+                        res.pipe(FS.createWriteStream(filepath)).on('close', () => {
+                            logger("info", "WC", `close`);
+                            resolve();
+                        });
                     });
-                });
-                req.on('error', err => {
-                    logger("err", "WC", err);
-                    reject(err);
-                });
+                    req.on('error', err => {
+                        logger("err", "WC", err);
+                        reject(err);
+                    });
+                })
+
             }
             catch (err) {
                 logger("err", "WC", err);
@@ -361,6 +365,10 @@ class WebClient {
                 let buff = Buffer.from(`${this.config.name}:${this.config.password}`, 'utf-8');
                 const auth = buff.toString('base64');
 
+                if (!FS.existsSync(filepath)) {
+                    reject("File not found");
+                    return;
+                }
                 var stat = FS.statSync(filepath);
                 let options = {
                     hostname: this.config.hostname,
@@ -436,63 +444,77 @@ class WebClient {
     }
 
     zipFolder(folder, file) {
-        return new Promise(resolve => {
+        return new Promise((resolve, reject) => {
             var zipfile = new yazl.ZipFile();
 
-            zipfile.outputStream.pipe(FS.createWriteStream(file)).on("close", () => {
-                resolve();
-            });
+            FS.mkdir(PATH.dirname(file), { recursive: true }, (err) => {
+                if (err) {
+                    console.trace(err);
+                    reject(err);
+                    return;
+                }
 
-            this.zipFolderAddFiles(zipfile, folder, "").then(() => {
-                zipfile.end();
+                zipfile.outputStream.pipe(FS.createWriteStream(file)).on("close", () => {
+                    resolve();
+                });
+
+                this.zipFolderAddFiles(zipfile, folder, "").then(() => {
+                    zipfile.end();
+                });
             });
         });
     }
 
     unzipFolder(file, folder) {
         return new Promise((resolve, reject) => {
-            yauzl.open(file, { lazyEntries: true }, function (err, zipfile) {
+            FS.mkdir(PATH.dirname(folder), { recursive: true }, (err) => {
                 if (err) {
                     console.trace(err);
                     reject(err);
                     return;
-                };
-                zipfile.readEntry();
-                zipfile.on("entry", function (entry) {
-
-                    if (/\/$/.test(entry.fileName)) {
-                        // Directory file names end with '/'.
-                        // Note that entries for directories themselves are optional.
-                        // An entry's fileName implicitly requires its parent directories to exist.
-                        zipfile.readEntry();
-                    } else {
-                        // file entry
-                        var filepath = [folder, entry.fileName].join(PATH.sep);
-                        FS.mkdir(PATH.dirname(filepath), { recursive: true }, (err) => {
-                            if (err) {
-                                console.trace(err);
-                                reject(err);
-                                return;
-                            };
-                            zipfile.openReadStream(entry, function (err, readStream) {
+                }
+                yauzl.open(file, { lazyEntries: true }, function (err, zipfile) {
+                    if (err) {
+                        console.trace(err);
+                        reject(err);
+                        return;
+                    };
+                    zipfile.readEntry();
+                    zipfile.on("entry", function (entry) {
+                        if (/\/$/.test(entry.fileName)) {
+                            // Directory file names end with '/'.
+                            // Note that entries for directories themselves are optional.
+                            // An entry's fileName implicitly requires its parent directories to exist.
+                            zipfile.readEntry();
+                        } else {
+                            // file entry
+                            var filepath = [folder, entry.fileName].join(PATH.sep);
+                            FS.mkdir(PATH.dirname(filepath), { recursive: true }, (err) => {
                                 if (err) {
                                     console.trace(err);
                                     reject(err);
                                     return;
                                 };
-                                readStream.on("end", function () {
-                                    zipfile.readEntry();
+                                zipfile.openReadStream(entry, function (err, readStream) {
+                                    if (err) {
+                                        console.trace(err);
+                                        reject(err);
+                                        return;
+                                    };
+                                    readStream.on("end", function () {
+                                        zipfile.readEntry();
+                                    });
+                                    readStream.pipe(FS.createWriteStream([folder, entry.fileName].join(PATH.sep)));
                                 });
-                                readStream.pipe(FS.createWriteStream([folder, entry.fileName].join(PATH.sep)));
                             });
-                        })
 
-                    }
+                        }
+                    });
+                    zipfile.on("end", () => {
+                        zipfile.close();
+                        resolve();
+                    });
                 });
-                zipfile.on("end", () => {
-                    zipfile.close();
-                    resolve();
-                })
             });
         });
     }
