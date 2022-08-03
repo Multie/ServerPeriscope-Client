@@ -22,7 +22,7 @@ process.stdin.setRawMode(true);
 var logger_names = [];
 var logger_backlog = [];
 var logger_input = false;
-var logger_colors = { err: "\u001b[31m", info: "\x1b[37m", warn: "\x1b[33m" }
+var logger_colors = { err: "\u001b[31m", info: "\033[38;5;159m", warn: "\x1b[33m", reset: "\u001b[0m" }
 function logger(type, name, text, force = false) {
     if (!logger_names.includes(name)) {
         logger_names.push(name);
@@ -55,6 +55,8 @@ function loggerResume() {
         logger(log.type, log.name, log.text);
     }
 }
+loggerResume();
+
 //#endregion
 /////////////////////////////////////////////////////////////////
 //#region EventEmitter
@@ -95,6 +97,7 @@ class WebsocketClient {
         this.outgoingEvents = outgoingEvents;
 
         this.connected = false;
+        this.reconectInterval = null;
     }
 
     heartbeat() {
@@ -110,18 +113,15 @@ class WebsocketClient {
     }
 
     connect() {
-        return new Promise((resolve) => {
-
+        return new Promise((resolve, reject) => {
             try {
-
-
+                logger("info", "Websocket", `Connecting to Server:${this.config.hostname}:${this.config.port}`);
                 this.websocketclient = new WebSocket(`ws://${this.config.hostname}:${this.config.port}`);
-
                 var timeout = setTimeout(() => {
                     if (!this.connected) {
                         if ([this.websocketclient.CLOSING, this.websocketclient.OPEN].includes(this.websocketclient.readyState))
                             this.websocketclient.terminate();
-                        logger("err", "WSC", "Timeout");
+                        logger("err", "Websocket", `Timeout connecting to Server:${this.config.hostname}:${this.config.port}`);
                         resolve();
                     }
                 }, this.config.reconnectInterval * 3);
@@ -130,19 +130,18 @@ class WebsocketClient {
                     this.websocketclient.send(JSON.stringify(data));
                 }
                 this.websocketclient.on('open', () => {
-                    logger("info", "WSC", `Connected to ws://${this.config.hostname}:${this.config.port}`);
+                    logger("info", "Websocket", `Connected`);
                     this.connected = true;
                     this.outgoingEvents.on("event", event);
                     clearTimeout(timeout);
                 });
                 this.websocketclient.on('message', (data) => {
                     data = JSON.parse(data)
-                    logger("info", "WSC", data);
                     this.incommingEvents.emit("event", data);
                 });
                 this.websocketclient.on('ping', this.heartbeat);
                 this.websocketclient.on('close', (err) => {
-                    logger("info", "WSC", `closed`);
+                    logger("err", "Websocket", `Disconected`);
                     this.connected = false;
                     this.outgoingEvents.removeListener("event", event);
                     clearTimeout(timeout);
@@ -150,30 +149,42 @@ class WebsocketClient {
                 });
                 this.websocketclient.on('error', (err) => {
                     logger("err", "WSC", err);
+                    logger("err", "Websocket", `Errored: ${err}`);
                     this.connected = false;
                     this.outgoingEvents.removeListener("event", event);
                     clearTimeout(timeout);
                     resolve();
                 });
             }
-            catch
-            { resolve(); }
+            catch (err) {
+                logger("err", "Websocket", `Errored: ${err}`);
+                resolve();
+            }
         });
     }
 
     start() {
         this.connect();
-        setInterval(() => {
+        this.reconectInterval = setInterval(() => {
             if (!this.connected) {
+                logger("err", "Websocket", `Trying to Reconnect`);
                 this.connect().catch((err) => {
 
                 });
             }
-        }, 1000);
+        }, 5000);
+    }
+    stop() {
+        if (this.reconectInterval) {
+            clearInterval(this.reconectInterval);
+        }
+        if (this.websocketclient) {
+            this.websocketclient.close();
+        }
     }
 
 }
-var WebsocketClientInstance = new WebsocketClient();
+var WebsocketClientInstance = new WebsocketClient(config, incommingEvents, outgoingEvents);
 //#endregion
 /////////////////////////////////////////////////////////////////
 //#region TCP Client
@@ -187,8 +198,6 @@ class tcpClient {
     }
     setup() {
         this.incommingEvents.on("event", (connection) => {
-            logger("info", "TCP", "incommingEvents");
-            //logger("info","TCP",connection);
             if (connection.event == "connection") {
                 try {
                     var client = new net.Socket();
@@ -266,57 +275,115 @@ class WebClient {
         this.config = config;
     }
 
+
+
+    getAllFilesStats(rootpath, path = "") {
+        return new Promise((resolve, reject) => {
+            FS.readdir(rootpath + path, (err, files) => {
+                if (err) {
+                    reject(err);
+                }
+                files = files || []
+                var proms = [];
+                for (let a = 0; a < files.length; a++) {
+                    let childpath = path + "\\" + files[a];
+                    let stat = FS.statSync(rootpath + childpath);
+                    if (stat.isDirectory()) {
+                        proms = proms.concat(this.getAllFilesStats(rootpath, childpath));
+                    }
+                    else {
+                        stat.path = (childpath).replace(rootpath + PATH.sep, "").replaceAll("\\", "/");
+                        delete stat.dev;
+                        delete stat.mode;
+                        delete stat.mode;
+                        delete stat.uid;
+                        delete stat.gid;
+                        delete stat.rdev;
+                        delete stat.blksize;
+                        delete stat.ino;
+                        delete stat.blocks;
+                        delete stat.nlink;
+                        delete stat.atime;
+                        delete stat.mtime;
+                        delete stat.ctime;
+                        delete stat.birthtime;
+
+                        proms.push(new Promise((resolve) => { resolve(stat) }));
+                    }
+                }
+                Promise.allSettled(proms).then((results) => {
+                    var resolved = [];
+                    results.forEach(element => {
+                        if (element.status == "fulfilled") {
+                            resolved.push(element.value);
+                        }
+                    });
+                    resolve(resolved.flat());
+                });
+            });
+        });
+    }
+
     request(method, path, data, contenttype = null) {
         return new Promise((resolve, reject) => {
             try {
-
+                //logger("info", "Request", `Request ${method} ${path}`)
 
                 let buff = Buffer.from(`${this.config.name}:${this.config.password}`, 'utf-8');
                 const auth = buff.toString('base64');
                 let options = {
                     hostname: this.config.hostname,
                     port: this.config.port,
-                    path: path,
+                    path: encodeURI(path).replace(/#/g, "%23"),
                     method: method,
                     headers: {
                         Authorization: `Basic ${auth}`
                     }
                 }
                 if (method != "GET") {
-                    options.headers['Content-Type'] = 'contenttype';
+                    options.headers['Content-Type'] = contenttype;
                     options.headers['Content-Length'] = data.length;
                 }
-                logger("info", "WC", `Request ${method} ${path}`)
+                //logger("info", "Request", `Request ${method} ${path}`)
                 let req = http.request(options, (res) => {
-                    logger("info", "WC", `Request statusCode:${res.statusCode}`)
+
+                    //logger("info", "Request", `Request statusCode:${res.statusCode}`)
                     let text = "";
                     res.on('data', chunk => {
                         text += chunk;
-                        logger("info", "WC", `Request data:${chunk}`)
+                        //logger("info", "Request", `Request data:${chunk}`)
                     });
                     res.on('close', () => {
+                        if (res.statusCode == 200) {
+                            resolve(text);
+                        }
+                        else {
+                            logger("err", "Request", `Error: ${res.statusCode} ${res.statusMessage} -> ${text}`);
+                            reject({ code: res.statusCode, message: res.statusMessage, bod: text });
+                        }
 
-                        logger("info", "WC", `close + ${text}`);
-                        resolve(text);
+
                     });
                 });
                 req.on('error', err => {
-                    logger("err", "WC", err);
+                    logger("err", "Request", err);
                     reject(err);
                 });
-                if (data.length > 0) {
-                    req.write(data);
+                if (data) {
+                    if (data.length > 0) {
+                        req.write(data);
+                    }
                 }
                 req.end();
             }
             catch (err) {
-                logger("err", "WC", err);
+                logger("err", "Request", err);
                 reject(err);
             }
         });
     }
 
-    requestFile(method, path, data, filepath) {
+    requestFile(method, path, filepath) {
         return new Promise((resolve, reject) => {
             try {
                 let buff = Buffer.from(`${this.config.name}:${this.config.password}`, 'utf-8');
@@ -324,36 +391,59 @@ class WebClient {
                 let options = {
                     hostname: this.config.hostname,
                     port: this.config.port,
-                    path: path,
+                    path: encodeURI(path).replace(/#/g, "%23"),
                     method: method,
                     headers: {
                         Authorization: `Basic ${auth}`
                     }
                 }
+
                 FS.mkdir(PATH.dirname(filepath), { recursive: true }, (err) => {
                     if (err) {
                         console.trace(err);
                         reject(err);
                         return;
                     }
-                    logger("info", "WC", `Request ${method} ${path}`)
-                    let req = http.get(options, (res) => {
-                        logger("info", "WC", `Request statusCode:${res.statusCode}`)
+                    //logger("info", "Request File", `Request ${options.method} ${options.hostname}:${options.port}${options.path}`)
+                    let req = http.request(options, (res) => {
+                        if (res.statusCode != 200) {
+                            logger("err", "Request", `Error: ${res.statusCode} ${res.statusMessage} ${path}`);
+                            reject({ code: res.statusCode, message: res.statusMessage });
+                            return;
+                        }
 
-                        res.pipe(FS.createWriteStream(filepath)).on('close', () => {
-                            logger("info", "WC", `close`);
-                            resolve();
+                        //logger("info", "Request File", `Request statusCode:${res.statusCode}`)
+
+                        //console.log(res.headers['content-length']);
+
+                        var writer = res.pipe(FS.createWriteStream(filepath));
+                        writer.on("data", (chunk) => {
+                            //logger("info", "Request File", `Request get data:${chunk}`)
+                        });
+                        writer.on('close', () => {
+                            //logger("info", "Request File", `close`);
+                            if (res.statusCode == 200) {
+                                resolve();
+                            }
+                            else {
+                                logger("err", "Request", `Error: ${res.statusCode} ${res.statusMessage}`);
+                                reject({ code: res.statusCode, message: res.statusMessage });
+                            }
+
                         });
                     });
                     req.on('error', err => {
-                        logger("err", "WC", err);
+                        logger("info", "Request File", `Request ${method} ${path}`);
+                        logger("err", "Request File", err);
                         reject(err);
                     });
+                    req.end();
                 })
 
             }
             catch (err) {
-                logger("err", "WC", err);
+                logger("info", "Request File", `Request ${method} ${path}`);
+                logger("err", "Request File", err);
                 reject(err);
             }
         });
@@ -373,7 +463,7 @@ class WebClient {
                 let options = {
                     hostname: this.config.hostname,
                     port: this.config.port,
-                    path: path,
+                    path: encodeURI(path),
                     method: method,
                     headers: {
                         Authorization: `Basic ${auth}`,
@@ -382,32 +472,48 @@ class WebClient {
                     }
                 }
                 let req = http.request(options, (res) => {
-                    logger("info", "WC", `Request statusCode:${res.statusCode}`)
+                    //logger("info", "File Upload", `Request statusCode:${res.statusCode}`)
                     let text = "";
                     res.on('data', chunk => {
                         text += chunk;
-                        logger("info", "WC", `Request data:${chunk}`)
+                        //logger("info", "File Upload", `Request data:${chunk}`)
                     });
                     res.on('close', () => {
 
-                        logger("info", "WC", `close + ${text}`);
+                        //logger("info", "File Upload", `close + ${text}`);
                         resolve(text);
                     });
 
                 });
                 req.on('error', err => {
-                    logger("err", "WC", err);
+                    logger("err", "File Upload", err);
                     reject(err);
                 });
 
                 var readStream = FS.createReadStream(filepath);
                 readStream.pipe(req);
+                var lastBytes = 0;
+                var lastTime = Date.now();
+                var lastPercent = 0;
+                readStream.on("data", (chunk) => {
+                    var percent = Math.round(readStream.bytesRead / stat.size * 1000) / 10;
+                    if (percent - lastPercent > 0.1) {
+                        var byteDiff = readStream.bytesRead - lastBytes;
+                        var timeDiff = Date.now() - lastTime;
+                        var speed = Math.round(byteDiff / (timeDiff / 1000) / 1024);
+
+                        logger("info", "File Upload", `Progress:${percent} %\t Speed:${speed} kb/sek`)
+                        lastBytes = readStream.bytesRead;
+                        lastTime = Date.now();
+                        lastPercent = percent;
+                    }
+                })
                 readStream.on("end", () => {
                     req.end();
                 })
             }
             catch (err) {
-                logger("err", "WC", err);
+                logger("err", "File Upload", err);
                 reject(err);
             }
         });
@@ -521,63 +627,146 @@ class WebClient {
 
     downloadLatestService() {
         return new Promise((resolve, reject) => {
-            var currentServicePath = [__dirname, "data", "current"].join(PATH.sep);
-            var currentServiceFilePath = [__dirname, "data", "current", "current.zip"].join(PATH.sep);
-            console.log(currentServicePath);
-            FS.rm(currentServicePath, { recursive: true }, (err) => {
-                if (err) {
-                    console.trace(err);
-                    reject(err);
-                    return;
-                }
-                FS.mkdir(currentServicePath, (err) => {
-                    if (err) {
-                        console.trace(err);
-                        reject(err);
-                        return;
-                    }
-                    this.requestFile("GET", "/data", "", currentServiceFilePath).then(() => {
-                        this.unzipFolder(currentServiceFilePath, currentServicePath).then(() => {
-                            console.log("Unzip complete");
-                            resolve();
+
+            this.request("GET", "/latest", "").then((statename) => {
+                this.request("GET", `/data/${statename}`, "").then(severStats => {
+                    severStats = JSON.parse(severStats);
+                    var currentStatPath = [__dirname, "data", "current"].join(PATH.sep);
+                    this.getAllFilesStats(currentStatPath).then(currentStats => {
+                        var proms = [];
+                        for (var a = 0; a < severStats.length; a++) {
+                            var index = currentStats.findIndex((val) => {
+                                return val.path == severStats[a].path;
+                            })
+                            if (index >= 0) {
+                                var oldfile = currentStats.splice(index, 1);
+                                if (oldfile.atimeMs < severStats[a].atimeMs ||
+                                    oldfile.mtimeMs < severStats[a].mtimeMs ||
+                                    oldfile.ctimeMs < severStats[a].ctimeMs ||
+                                    oldfile.birthtimeMs < severStats[a].birthtimeMs) {
+                                    //logger("info", "Download", `Update File: /${statename}${severStats[a].path}`);
+                                    var filepath = [currentStatPath, severStats[a].path.replace(/\//g, PATH.sep)].join(PATH.sep);
+                                    proms.push(this.requestFile("GET", `/data/${statename}${severStats[a].path}`, filepath));
+                                }
+                            }
+                            else {
+                                // is a new File
+                                //logger("info", "Download", `Download File: /${statename}${severStats[a].path}`);
+                                var filepath = [currentStatPath, severStats[a].path.replace(/\//g, PATH.sep)].join(PATH.sep);
+                                proms.push(this.requestFile("GET", `/data/${statename}${severStats[a].path}`, filepath));
+                            }
+                        }
+                        var deleteFile = (path) => {
+                            return new Promise((resolve, reject) => {
+                                FS.rm(path, (err) => {
+                                    if (err) {
+                                        reject(err);
+                                    }
+                                    resolve();
+                                })
+                            })
+                        }
+                        var filestoDelete = currentStats;
+                        filestoDelete.forEach(element => {
+                            logger("info", "Download", `Delete File: /${statename}${element.path}`);
+                            var filepath = [currentStatPath, element.path.replace(/\//g, PATH.sep)].join(PATH.sep);
+                            proms.push(deleteFile(filepath));
+                        });
+                        Promise.allSettled(proms).then((results) => {
+                            this.getAllFilesStats(currentStatPath).then((currentStats) => {
+                                var filepath = [currentStatPath, "stats.json"].join(PATH.sep);
+                                FS.writeFile(filepath, JSON.stringify(currentStats), (err) => {
+                                    if (err) {
+                                        logger("info", "Download", `Error Write Stats File: /${filepath} ${err}`);
+                                        reject(err);
+                                    }
+                                    resolve();
+                                })
+
+                                /* results.forEach(result => {
+                                     if (result.status == "rejected") {
+                                         console.log(result.reason);
+                                     }
+                                 });*/
+                            });
+
                         });
                     });
                 });
             });
-
-
-
         });
     }
     uploadCurrentService() {
         return new Promise((resolve, reject) => {
-            var folderPath = [__dirname, "data", "current"].join(PATH.sep);
-            var curdate = new Date(Date.now());
-            var zipPath = [__dirname, "data", "old", `${this.config.name}#${curdate.toISOString().replaceAll(":", "_").replaceAll(".", ",")}.zip`].join(PATH.sep);
-
-            logger("info", "uploadCurrentService", folderPath);
-            logger("info", "uploadCurrentService", zipPath);
-            logger("info", "uploadCurrentService", "Start creating zip file");
-            this.zipFolder(folderPath, zipPath).then(() => {
-                logger("info", "uploadCurrentService", "Done creating zip file");
-                logger("info", "uploadCurrentService", "Start upload");
-                this.postFile("POST", "/data", zipPath).then(() => {
-                    logger("info", "uploadCurrentService", "Done upload");
-                    resolve();
+            logger("info", "Upload", "Create new State");
+            this.request("GET", "/newlatest", "").then((statename) => {
+                logger("info", "Upload", `new State:${statename}`);
+                this.request("GET", `/data/${statename}`, "").then((serverStats) => {
+                    serverStats = JSON.parse(serverStats);
+                    var currentPath = [__dirname, "data", "current"].join(PATH.sep);
+                    this.getAllFilesStats(currentPath).then((currentStats) => {
+                        var proms = [];
+                        for (var a = 0; a < currentStats.length; a++) {
+                            var index = serverStats.findIndex((val) => {
+                                return val.path == currentStats[a].path;
+                            })
+                            if (index >= 0) {
+                                var oldfile = serverStats.splice(index, 1);
+                                if (oldfile.atimeMs < currentStats[a].atimeMs ||
+                                    oldfile.mtimeMs < currentStats[a].mtimeMs ||
+                                    oldfile.ctimeMs < currentStats[a].ctimeMs ||
+                                    oldfile.birthtimeMs < currentStats[a].birthtimeMs) {
+                                    logger("info", "Upload", `Update File: /${statename}${currentStats[a].path}`);
+                                    proms.push(this.postFile("POST", `/data/${statename}${currentStats[a].path}`, ""));
+                                }
+                            }
+                            else {
+                                // is a new File
+                                logger("info", "Upload", `Upload new File: /${statename}${currentStats[a].path}`);
+                                proms.push(this.postFile("POST", `/data/${statename}${currentStats[a].path}`, ""));
+                            }
+                        }
+                        var filestoDelete = serverStats;
+                        filestoDelete.forEach(element => {
+                            logger("info", "Upload", `Reqeust File: /${statename}${element.path}`);
+                            proms.push(this.request("DELETE", `/data/${statename}${element.path}`, ""));
+                        });
+                        Promise.allSettled(proms).then((results) => {
+                            resolve();
+                        });
+                    });
                 }, (err) => {
-                    reject(err);
-                });
+                })
             }, (err) => {
-                reject(err);
-            })
+            });
+            /*
+             var folderPath = [__dirname, "data", "current"].join(PATH.sep);
+             var curdate = new Date(Date.now());
+             var zipPath = [__dirname, "data", "old", `${this.config.name}#${curdate.toISOString().replaceAll(":", "_").replaceAll(".", ",")}.zip`].join(PATH.sep);
+     
+             logger("info", "Upload", "Start packing service");
+             this.zipFolder(folderPath, zipPath).then(() => {
+                 logger("info", "Upload", "Finished packing service");
+                 logger("info", "Upload", "Start upload");
+                 this.postFile("POST", "/data", zipPath).then(() => {
+                     logger("info", "Upload", "Complete");
+                     resolve();
+                 }, (err) => {
+                     reject(err);
+                 });
+             }, (err) => {
+                 reject(err);
+             })*/
         });
     }
 
     becomeHost() {
         return new Promise((resolve, reject) => {
             this.request("GET", "/host", "").then(() => {
+                logger("info", "Host", "I have become the host");
                 resolve();
             }, (err) => {
+                logger("info", "Host", `I didn't become the host:${err}`);
                 reject(err);
             });
         });
@@ -596,17 +785,48 @@ class RunService {
     runService() {
         return new Promise((resolve, reject) => {
             var datapath = [__dirname, "data", "current"].join(PATH.sep);
+            logger("info", "Run", `Start ${this.config.startcommand}`);
             //`title MinecraftServer & start cmd.exe /c "${this.config.startcommand} & pause"`
             var child = exec(`${this.config.startcommand}`, { cwd: datapath })
+
+            child.stdout.on("data", (text) => {
+                logger("info", "Service", text.replace(/\n/g, "").replace(/\r/g, ""));
+            });
+            /* process.stdin.on("data",(text)=> {
+                 if (child) {
+                     console.log(text);
+                     child.stdin.write(text);
+                 }
+             })*/
             //var child = exec("echo", ["hallow", "welt"])
-
-            readline.emitKeypressEvents(process.stdin);
-            process.stdin.setRawMode(true);
-            child.stdout.pipe(process.stdout);
-            process.stdin.pipe(child.stdin);
-
-            child.on("close", () => {
+            /*
+                         readline.emitKeypressEvents(process.stdin);
+                         process.stdin.setRawMode(true);
+                         process.stdin.on('keypress', (str, key) => {
+                            if (child) {
+                             child.stdin.removeAllListeners().emit("keypress",str,key);
+                            }
+                         })*/
+            // child.stdout.pipe(process.stdout);
+            var listener = (chunk) =>  {
+ // const chunk = process.stdin.read();
+ if (chunk !== null) {
+    //logger("warn", "Service",chunk.toString());
+    child.stdin.write(chunk.toString());
+    //child.stdin.end();
+}
+            }
+            process.stdin.on("data", listener);
+            //process.stdin.pipe(child.stdin);
+            child.on("close",()=> {
+                process.stdin.removeListener("data",listener);
+                //process.stdin.unpipe();
                 console.log("close");
+            })
+            child.on("exit", () => {
+                //child.stdout.unpipe();
+                
+                console.log("exit");
                 resolve();
             });
         });
@@ -624,7 +844,9 @@ const rl = readline.createInterface({
 
 function askCurrentService() {
     return new Promise(resolve => {
-        rl.question("Do you want to download the latest version ? [y/n]", (answer) => {
+        loggerStop();
+        rl.question(logger_colors["info"] + "Do you want to download the latest version ? [y/n]" + logger_colors["reset"], (answer) => {
+            loggerResume();
             if (answer == "y") {
                 WebClientInstance.downloadLatestService().then(() => {
                     resolve();
@@ -641,7 +863,9 @@ function askCurrentService() {
 }
 function askStartService() {
     return new Promise(resolve => {
-        rl.question("Would you like to start the service ? [y/n]", (answer) => {
+        loggerStop();
+        rl.question(logger_colors["info"] + "Would you like to start the service ? [y/n]" + logger_colors["reset"], (answer) => {
+            loggerResume();
             if (answer == "y") {
                 RunServiceInstance.runService().then(() => {
                     resolve();
@@ -657,7 +881,9 @@ function askStartService() {
 }
 function askBecomeHost() {
     return new Promise(resolve => {
-        rl.question("Would you like to be the host? [y/n]", (answer) => {
+        loggerStop();
+        rl.question(logger_colors["info"] + "Would you like to be the host? [y/n]" + logger_colors["reset"], (answer) => {
+            loggerResume();
             if (answer == "y") {
                 WebClientInstance.becomeHost().then(() => {
                     WebsocketClientInstance.start();
@@ -674,8 +900,11 @@ function askBecomeHost() {
 }
 function askUploadService() {
     return new Promise(resolve => {
-        rl.question("Do you want to upload the current version? [y/n]", (answer) => {
+        loggerStop();
+        rl.question(logger_colors["info"] + "Do you want to upload the current version? [y/n]" + logger_colors["reset"], (answer) => {
+            loggerResume();
             if (answer == "y") {
+                WebsocketClientInstance.stop();
                 WebClientInstance.uploadCurrentService().then(() => {
                     logger("info", "uploadCurrentService", `done`);
                     resolve();
@@ -690,14 +919,48 @@ function askUploadService() {
     });
 }
 
-askCurrentService().then(() => {
-    askBecomeHost().then(() => {
-        askStartService().then(() => {
-            askUploadService().then(() => {
-                process.exit()
-            })
-        })
-    })
-})
 
+askCurrentService().then(() => {
+    setTimeout(() => {
+        askBecomeHost().then(() => {
+            setTimeout(() => {
+                askStartService().then(() => {
+                    setTimeout(() => {
+                        askUploadService().then(() => {
+                            process.exit()
+                        })
+                    }, 20)
+                })
+            }, 20)
+        })
+    }, 20)
+
+})
+//*/
 //#endregion
+/*
+WebClientInstance.uploadCurrentService().then(() => {
+    logger("info", "uploadCurrentService", `done`);
+    resolve();
+}, (err) => {
+    resolve();
+});
+//*/
+/*
+WebClientInstance.requestFile("GET",`/data/malte+2022-08-02T19_59_40,567Z/world/PortalGun_world.cfg`,"D:\Externe Festplatte\Projekte\ServerPerisope\ServerPeriscope\ServerPeriscope-Client\data\current\world\PortalGun_world.cfg").then(() => {
+    logger("info", "requestFile", `done`);
+    resolve();
+}, (err) => {
+    console.log(err)
+    resolve();
+});
+*/
+/*
+WebClientInstance.downloadLatestService().then(() => {
+    logger("info", "downloadLatestService", `done`);
+    resolve();
+}, (err) => {
+    console.log(err)
+    resolve();
+});
+//*/
