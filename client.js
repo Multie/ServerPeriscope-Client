@@ -57,6 +57,22 @@ function loggerResume() {
 }
 loggerResume();
 
+var logTimesData = {};
+function timeTimes(name,date) {
+    if (logTimesData[name] == undefined || logTimesData[name] == null) {
+        logTimesData[name] = 0;
+    }
+    logTimesData[name] = ((9/10) * logTimesData[name]) + ((1/10) * (Date.now() - date));
+}
+function logTimes() {
+    var keys = Object.keys(logTimesData);
+    let text = "";
+    for (var a = 0; a < keys.length;a++) {
+        text += ` ${keys[a]}: ${ Math.round(logTimesData[keys[a]]*1000)/1000} ms`;
+    }
+    logger("info","time",text);
+}
+
 //#endregion
 /////////////////////////////////////////////////////////////////
 //#region EventEmitter
@@ -89,15 +105,20 @@ var config = readConfig(`${__dirname}${PATH.sep}configs${PATH.sep}config.json`);
 //#region Websocket
 const ws = require("ws");
 const WebSocket = ws.WebSocket;
-
+const net = require('net');
 class WebsocketClient {
-    constructor(config, incommingEvents, outgoingEvents) {
+    constructor(config) {
         this.config = config;
-        this.incommingEvents = incommingEvents;
-        this.outgoingEvents = outgoingEvents;
+
 
         this.connected = false;
         this.reconectInterval = null;
+
+        this.connections = {};
+        setInterval(()=> {
+            logTimes();
+        },5000);
+
     }
 
     heartbeat() {
@@ -108,6 +129,7 @@ class WebsocketClient {
         // Delay should be equal to the interval at which your server
         // sends out pings plus a conservative assumption of the latency.
         this.pingTimeout = setTimeout(() => {
+            this.websocketclient.close();
             //this.terminate();
         }, 30000 + 1000);
     }
@@ -117,6 +139,7 @@ class WebsocketClient {
             try {
                 logger("info", "Websocket", `Connecting to Server:${this.config.hostname}:${this.config.port}`);
                 this.websocketclient = new WebSocket(`ws://${this.config.hostname}:${this.config.port}`);
+
                 var timeout = setTimeout(() => {
                     if (!this.connected) {
                         if ([this.websocketclient.CLOSING, this.websocketclient.OPEN].includes(this.websocketclient.readyState))
@@ -126,24 +149,75 @@ class WebsocketClient {
                     }
                 }, this.config.reconnectInterval * 3);
 
-                var event = (data) => {
-                    this.websocketclient.send(JSON.stringify(data));
-                }
                 this.websocketclient.on('open', () => {
                     logger("info", "Websocket", `Connected`);
                     this.connected = true;
-                    this.outgoingEvents.on("event", event);
+                    //this.outgoingEvents.on("event", event);
                     clearTimeout(timeout);
                 });
+
                 this.websocketclient.on('message', (data) => {
                     data = JSON.parse(data)
-                    this.incommingEvents.emit("event", data);
+                    if (!data) {
+                        return;
+                    }
+                    timeTimes("wsRecieved",data.timestamp);
+                    if (data.event == "connection") {
+                        var client = new net.Socket();
+                        client.connect(this.config.sendPort, '127.0.0.1', () => {
+                            this.connections[data.id] = { client: client };
+                            client.on('data', (chunk) => {
+                                var connection = {
+                                    id:data.id,
+                                    event:"message",
+                                    timestamp:Date.now()
+                                };
+                                timeTimes("tcpRecieved",connection.timestamp);
+                                if (chunk.length > 0) {
+                                    connection.data = new Array(chunk.length);
+                                    for (let i = 0; i < chunk.length; i = i + 1)
+                                        connection.data[i] = chunk[i];
+                                }
+                                else {
+                                    connection.data = [];
+                                }
+                                this.websocketclient.send(JSON.stringify(connection));
+                                timeTimes("wsSend",connection.timestamp);
+                            });
+                            client.on("close",()=> {
+                                var connection = {
+                                    id:data.id,
+                                    event:"closed",
+                                    timestamp:Date.now()
+                                };
+                                this.websocketclient.send(JSON.stringify(connection));
+                            });
+                        });
+                    }
+                    else if (data.event == "message") {
+                        if (this.connections[data.id]) {
+                            var client = this.connections[data.id].client;
+                            let buf = new Buffer.from(Uint8Array.from(data.data));
+                            client.write(buf);
+                            timeTimes("tcpSend",data.timestamp);
+                        }
+                    }
+                    else if (data.event == "closed") {
+                        if (this.connections[data.id]) {
+                            var client = this.connections[data.id].client;
+                            client.destroy();
+                        }
+                        delete this.connections[data.id]
+                    }
+
+
                 });
+                
                 this.websocketclient.on('ping', this.heartbeat);
                 this.websocketclient.on('close', (err) => {
                     logger("err", "Websocket", `Disconected`);
                     this.connected = false;
-                    this.outgoingEvents.removeListener("event", event);
+                    //this.outgoingEvents.removeListener("event", event);
                     clearTimeout(timeout);
                     resolve();
                 });
@@ -151,7 +225,7 @@ class WebsocketClient {
                     logger("err", "WSC", err);
                     logger("err", "Websocket", `Errored: ${err}`);
                     this.connected = false;
-                    this.outgoingEvents.removeListener("event", event);
+                    //this.outgoingEvents.removeListener("event", event);
                     clearTimeout(timeout);
                     resolve();
                 });
@@ -188,23 +262,35 @@ var WebsocketClientInstance = new WebsocketClient(config, incommingEvents, outgo
 //#endregion
 /////////////////////////////////////////////////////////////////
 //#region TCP Client
-const net = require('net');
+/*const net = require('net');
 class tcpClient {
-    constructor(config, incommingEvents, outgoingEvents) {
+    constructor(config, websocketclient) {
         this.config = config;
-        this.incommingEvents = incommingEvents;
-        this.outgoingEvents = outgoingEvents;
-        this.connections = [];
+        this.websocketclient = websocketclient;
+
+        this.connections = {};
+
+        this.averageTime = 0;
+        this.messagecount = 0;
+        setInterval(() => {
+            logger("info","TCP",`Status\tConnections:${Object.keys(this.connections).length}`)
+            this.messagecount = 0;
+            logTimes();
+        }, 10000);
     }
     setup() {
+
+        
+        
         this.incommingEvents.on("event", (connection) => {
+            console.log(connection)
             if (connection.event == "connection") {
                 try {
                     var client = new net.Socket();
                     client.connect(this.config.sendPort, '127.0.0.1', () => {
 
-                        this.connections.push({ client: client, connection: connection });
-
+                        this.connections[connection.ip+connection.port] = { client: client, connection: connection };
+                        logger("info","TCP",`Connect\tConnections:${ Object.keys(this.connections).length} `)
                         client.on('data', (chunk) => {
                             if (chunk.length > 0) {
                                 connection.data = new Array(chunk.length);
@@ -214,33 +300,43 @@ class tcpClient {
                             else {
                                 connection.data = [];
                             }
+                            if (this.connections[connection.ip+connection.port].date) {
+                                timeTimes("RecievedTCP",this.connections[connection.ip+connection.port].date);
+                            }
+                            connection.date = this.connections[connection.ip+connection.port].date;
                             connection.event = "message";
                             this.outgoingEvents.emit("event", connection);
                         });
                         client.on('close', () => {
+                            logger("info","TCP",`Closed\tConnections:${ Object.keys(this.connections).length} `)
                             connection.event = "closed";
                             this.outgoingEvents.emit("event", connection);
-                            var index = this.connections.indexOf(connection);
-                            this.connections.splice(index, 1);
+                            delete this.connections[connection.ip+connection.port]
 
                         });
                         client.on('error', (err) => {
+                            logger("err","TCP",`Errored\tConnections:${ Object.keys(this.connections).length} `)
                             connection.event = "closed";
                             this.outgoingEvents.emit("event", connection);
-                            var index = this.connections.indexOf(connection);
-                            this.connections.splice(index, 1);
-
+                            delete this.connections[connection.ip+connection.port]
                         });
                     });
+                    client.on("error",(err)=> {
+                        logger("err","TCPClient",err);
+                    })
                 }
                 catch
                 { }
             }
             else if (connection.event == "message") {
-                var element = this.connections.find((con) => {
-                    return (connection.ip == con.connection.ip && connection.port == con.connection.port);
-                })
+                var element = this.connections[connection.ip+connection.port];
                 if (element) {
+                    if (connection.date > 0) {
+                        this.connections[connection.ip+connection.port].date = connection.date;
+                        timeTimes("SendingTCP",connection.date);
+                        //this.averageTime = ((9/10)* this.averageTime) + ((1/10) * (Date.now() - connection.date));
+                    }
+                    
                     var client = element.client;
                     if (connection.data.length > 0) {
                         let buf = new Buffer.from(Uint8Array.from(connection.data));
@@ -249,9 +345,7 @@ class tcpClient {
                 }
             }
             else if (connection.event == "closed") {
-                var element = this.connections.find((con) => {
-                    return connection.ip == con.connection.ip && connection.port == con.connection.port;
-                })
+                var element = this.connections[connection.ip+connection.port];
                 if (element) {
                     var client = element.client;
                     client.end();
@@ -263,6 +357,7 @@ class tcpClient {
 }
 var tcpClientInstance = new tcpClient(config, incommingEvents, outgoingEvents);
 tcpClientInstance.setup();
+*/
 //#endregion
 /////////////////////////////////////////////////////////////////
 //#region Web Client
@@ -925,11 +1020,14 @@ askCurrentService().then(() => {
         askBecomeHost().then(() => {
             setTimeout(() => {
                 askStartService().then(() => {
-                    setTimeout(() => {
-                        askUploadService().then(() => {
-                            process.exit()
-                        })
-                    }, 20)
+                    rl.question("to continue enter enything",(ans)=> {
+                        setTimeout(() => {
+                            askUploadService().then(() => {
+                                process.exit()
+                            })
+                        }, 20)
+                    });
+                    
                 })
             }, 20)
         })
